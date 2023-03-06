@@ -10,7 +10,7 @@
 #include <phase1.h>
 #include <phase2.h>
 #include <usloss.h>
-
+#include <string.h>
 #include "message.h"
 
 /* ------------------------- Prototypes ----------------------------------- */
@@ -18,6 +18,8 @@ int start1(char *);
 extern int start2(char *);
 void disableInterrupts();
 void enableInterrupts();
+void shift_pids(mail_box *input);
+void add_pid(mail_box *input);
 
 /* -------------------------- Globals ------------------------------------- */
 
@@ -25,7 +27,7 @@ int debugflag2 = 0;
 
 /* the mail boxes */
 mail_box MailBoxTable[MAXMBOX];
-
+slot_ptr *CurrentMbox;
 /* -------------------------- Functions -----------------------------------
   Below I have code provided to you that calls
 
@@ -64,6 +66,11 @@ int start1(char *arg)
    {
       // Initializing the mailbox table
       MailBoxTable[i].mbox_id = -1;
+
+      for (int j = 0; j < MAXPROC; j++)
+      {
+         MailBoxTable[i].pid[j] = -1;
+      }
    }
 
    enableInterrupts();
@@ -153,6 +160,7 @@ int MboxCreate(int slots, int slot_size)
    ----------------------------------------------------------------------- */
 int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
 {
+   slot_ptr *CurrentMbox = MailBoxTable[mbox_id].mail_slot_array;
    // check if in kernel mode
    if ((PSR_CURRENT_MODE & psr_get()) == 0)
    {
@@ -166,24 +174,41 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
    }
    // check if msg_size is greater than max allowed
    // check if mbox_id is initialized on MailBoxTable
-   int i = 0;
-
-   for (int i = 0; i < MailBoxTable[mbox_id].num_slots; i++)
+   while (1)
    {
-      if (MailBoxTable[mbox_id].mail_slot_array[i] != NULL)
+      for (int i = 0; i < MailBoxTable[mbox_id].num_slots; i++)
       {
-         if (MailBoxTable[mbox_id].mail_slot_array[i]->status == EMPTY)
+         if (CurrentMbox[i] != NULL)
          {
-            memcpy(&(MailBoxTable[mbox_id].mail_slot_array[i]->message), msg_ptr, msg_size);
-            MailBoxTable[mbox_id].mail_slot_array[i]->status = FULL;
-            return 0;
+            if (CurrentMbox[i]->status == EMPTY)
+            {
+               memcpy(&(CurrentMbox[i]->message), msg_ptr, msg_size);
+               CurrentMbox[i]->status = FULL;
+               if (MailBoxTable[mbox_id].is_blocked == 1 && MailBoxTable[mbox_id].block_reason == BLOCK_SELF)
+               {
+                  int pid = MailBoxTable[mbox_id].pid[0];
+                  shift_pids(&MailBoxTable[mbox_id]);
+                  if (MailBoxTable[mbox_id].pid[0] != -1)
+                  {
+                     unblock_proc(pid);
+                     return 0;
+                  }
+                  else
+                  {
+                     MailBoxTable[mbox_id].block_reason = 0;
+                     MailBoxTable[mbox_id].is_blocked = 0;
+                     unblock_proc(pid);
+                  }
+               }
+               return 0;
+            }
          }
       }
-      else
-      {
-         i = -1;
-         block_me(11);
-      }
+      // couldn't find an empty mailbox, blocking process until it empties a mailslot
+      MailBoxTable[mbox_id].block_reason = BLOCK_SELF;
+      add_pid(&MailBoxTable[mbox_id]);
+      MailBoxTable[mbox_id].is_blocked = 1;
+      block_me(11);
    }
 
 } /* MboxSend */
@@ -194,11 +219,14 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size)
              Block the receiving process if no msg available.
    Parameters - mailbox id, pointer to put data of msg, max # of bytes that
                 can be received.
-   Returns - actual size of msg if successful, -1 if invalid args.
+   Returns - actual size of msg if successful, -1 if invalid args, -3 if process is zapped
+             mailbox was released while process was blocked on mailbox
    Side Effects - none.
    ----------------------------------------------------------------------- */
 int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
 {
+   slot_ptr *CurrentMbox = MailBoxTable[mbox_id].mail_slot_array;
+
    // check if in kernel mode
    if ((PSR_CURRENT_MODE & psr_get()) == 0)
    {
@@ -212,26 +240,49 @@ int MboxReceive(int mbox_id, void *msg_ptr, int msg_size)
    }
    // check if msg_size is greater than max allowed
    // check if mbox_id is initialized on MailBoxTable
-   int i = 0;
 
-   for (int i = 0; i < MailBoxTable[mbox_id].num_slots; i++)
+   while (1)
    {
-      if (MailBoxTable[mbox_id].mail_slot_array[i] != NULL)
+      for (int i = 0; i < MailBoxTable[mbox_id].num_slots; i++)
       {
-         if (MailBoxTable[mbox_id].mail_slot_array[i]->status == FULL)
+         if (CurrentMbox[i] != NULL)
          {
-            memcpy(msg_ptr, &(MailBoxTable[mbox_id].mail_slot_array[i]->message), msg_size);
-            MailBoxTable[mbox_id].mail_slot_array[i]->message = NULL;
-            MailBoxTable[mbox_id].mail_slot_array[i]->status = EMPTY;
-            return 0;
+            if (CurrentMbox[i]->status == FULL)
+            {
+               // this is a char offset pointer to access the mem address of the message and apply it to result
+               // finding the length of the str message taken out
+               char *ptr = &CurrentMbox[i]->message;
+               int result = strlen(ptr) + 1;
+               memcpy(msg_ptr, &(CurrentMbox[i]->message), msg_size);
+               CurrentMbox[i]->message = NULL;
+               CurrentMbox[i]->status = EMPTY;
+               if (MailBoxTable[mbox_id].is_blocked == 1 && MailBoxTable[mbox_id].block_reason == BLOCK_SELF)
+               {
+                  int pid = MailBoxTable[mbox_id].pid[0];
+                  shift_pids(&MailBoxTable[mbox_id]);
+                  if (MailBoxTable[mbox_id].pid[0] != -1)
+                  {
+                     unblock_proc(pid);
+                     return result;
+                  }
+                  else
+                  {
+                     MailBoxTable[mbox_id].block_reason = 0;
+                     MailBoxTable[mbox_id].is_blocked = 0;
+                     unblock_proc(pid);
+                  }
+               }
+               return result;
+            }
          }
       }
-      else
-      {
-         i = -1;
-         block_me(11);
-      }
+      // couldn't find a mailbox with a message, blocking process until it recieves a message
+      MailBoxTable[mbox_id].block_reason = BLOCK_SELF;
+      add_pid(&MailBoxTable[mbox_id]);
+      MailBoxTable[mbox_id].is_blocked = 1;
+      block_me(11);
    }
+
 } /* MboxReceive */
 
 /* ------------------------------------------------------------------------
@@ -352,3 +403,37 @@ void enableInterrupts()
       psr_set(psr_get() | PSR_CURRENT_INT);
    }
 } /* enableInterrupts */
+
+void shift_pids(mail_box *input)
+{
+   mail_box *cur = input;
+   for (int i = 0; i < MAXPROC; i++)
+   {
+      if (i + 1 > MAXPROC)
+      {
+         cur->pid[i] = -1;
+         return;
+      }
+      else if (cur->pid[i] == -1)
+      {
+         return;
+      }
+      else
+      {
+         input->pid[i] = input->pid[i + 1];
+      }
+   }
+}
+
+void add_pid(mail_box *input)
+{
+   mail_box *cur = input;
+   for (int i = 0; i < MAXPROC; i++)
+   {
+      if (cur->pid[i] == -1)
+      {
+         cur->pid[i] = getpid();
+         return;
+      }
+   }
+}
