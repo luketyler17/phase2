@@ -1,4 +1,3 @@
-
 /* Creates a 5-slot mailbox. Creates XXp1 that sends five messages to the
  * mailbox, then terminates. Creates XXp2a,b,c each of which sends a
  * message to the mailbox and gets blocked since the box is full.

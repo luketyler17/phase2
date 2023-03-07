@@ -1,25 +1,43 @@
 #define DEBUG2 1
 
 typedef struct mail_slot *slot_ptr;
+typedef struct mail_slot slot_not_ptr;
 typedef struct mailbox mail_box;
 typedef struct mbox_proc *mbox_proc_ptr;
+typedef struct queue queue;
+
+struct queue {
+   slot_ptr head;
+   slot_ptr tail;
+   int      size;
+   int      type;
+   int      blocked_pid;
+};
 
 struct mailbox {
    int           mbox_id;
    /* other items as needed... */
-   slot_ptr      mail_slot_array[MAXSLOTS]; // -101 == DO NOT USE, -100 == OPEN FOR USE
-   int           num_slots;
-   int           is_blocked;
-   int           block_reason;
-   int           pid[MAXPROC];
+   //slot_ptr      mail_slot_array[MAXSLOTS]; // -101 == DO NOT USE, -100 == OPEN FOR USE
+   int           num_slots_remaining;
+   // int           is_blocked;
+   // int           block_reason;
+   // int           pid[MAXPROC];
+   int           total_slots;
+   int           size_of_slots;
+   queue         slots;
+   queue         send_blocked;
+   queue         recieve_blocked;
 };
 
 struct mail_slot {
    int       mbox_id;
    int       status;
+   slot_ptr  next_slot;
    /* other items as needed... */
    void      *message;
-   int       mail_slot_id;
+   int       msg_overflow[MAX_MESSAGE];
+   int       size_of_message;
+   int       blocked_pid;
 };
 
 struct psr_bits {
@@ -34,6 +52,7 @@ union psr_values {
    struct psr_bits bits;
    unsigned int integer_part;
 };
+
 
 
 #define EMPTY 1
